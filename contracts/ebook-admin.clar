@@ -1,63 +1,130 @@
 ;;-----------------------------------------------------------------------------
-;; E-Book Management Smart Contract
+;; E-Book Management Smart Contract (Simplified)
 ;;-----------------------------------------------------------------------------
-;; This contract allows users to manage e-book metadata. Users can:
-;; 1. Upload new e-books with a title and have their ownership recorded.
-;; 2. Retrieve metadata for an e-book using its unique ID.
-;; The contract ensures title validation and provides error handling.
+;; This contract provides a decentralized platform for managing e-books, enabling 
+;; users to upload and transfer e-books while maintaining ownership and access controls.
+;; Key features include:
+;; - Uploading e-books with metadata (title, size, summary)
+;; - Transferring e-book ownership
 ;;-----------------------------------------------------------------------------
 
+;;-----------------------------------------------------------------------------
+;; Constants and Error Codes
+;;-----------------------------------------------------------------------------
+(define-constant ADMIN tx-sender) ;; The administrator of the platform
+
 ;; Error Codes
-(define-constant ERR-NOT-FOUND (err u301)) ;; Error when an e-book ID is not found
-(define-constant ERR-TITLE (err u303))     ;; Error when the title is empty
+(define-constant ERR-NOT-FOUND (err u301))  ;; E-Book not found in storage
+(define-constant ERR-EXISTS (err u302))     ;; E-Book already exists
+(define-constant ERR-TITLE (err u303))      ;; Invalid title format or length
+(define-constant ERR-SIZE (err u304))       ;; Invalid file size
+(define-constant ERR-AUTH (err u305))       ;; Unauthorized operation
+(define-constant ERR-RECIPIENT (err u306))  ;; Invalid recipient for transfer
+(define-constant ERR-ADMIN (err u307))      ;; Admin-only operation
+(define-constant ERR-ACCESS (err u308))     ;; Invalid access request
+
+;; Validation Limits
+(define-constant MAX-TITLE-LENGTH u64)      ;; Maximum title length in characters
+(define-constant MAX-SUMMARY-LENGTH u256)   ;; Maximum summary length in characters
+(define-constant MAX-FILE-SIZE u1000000000) ;; Maximum file size in bytes
 
 ;;-----------------------------------------------------------------------------
 ;; Data Storage
 ;;-----------------------------------------------------------------------------
 
-;; Tracks the total number of e-books uploaded
+;; Track the total number of e-books uploaded
 (define-data-var total-ebooks uint u0)
 
-;; Maps unique e-book IDs to their metadata (title and author)
+;; Store e-book details, indexed by a unique e-book ID
 (define-map ebooks
-    { ebook-id: uint }                     ;; Key: Unique ID for each e-book
-    { 
-        title: (string-ascii 64),          ;; E-book title, max 64 ASCII characters
-        author: principal                  ;; Principal (address) of the e-book owner
+    { ebook-id: uint }
+    {
+        title: (string-ascii 64),         ;; Title of the e-book
+        author: principal,               ;; Address of the e-book author
+        file-size: uint,                 ;; File size of the e-book in bytes
+        upload-time: uint,               ;; Block height when the e-book was uploaded
+        summary: (string-ascii 256)      ;; Summary of the e-book
     }
+)
+
+;; Manage access rights to e-books
+(define-map access-rights
+    { ebook-id: uint, user: principal }
+    { can-access: bool } ;; Indicates whether the user has access to the e-book
+)
+
+;;-----------------------------------------------------------------------------
+;; Private Utility Functions
+;;-----------------------------------------------------------------------------
+
+;; Check if an e-book exists by its ID
+(define-private (ebook-exists? (ebook-id uint))
+    (is-some (map-get? ebooks { ebook-id: ebook-id }))
+)
+
+;; Verify if the specified principal is the author of the e-book
+(define-private (is-author? (ebook-id uint) (author principal))
+    (match (map-get? ebooks { ebook-id: ebook-id })
+        book-data (is-eq (get author book-data) author)
+        false
+    )
 )
 
 ;;-----------------------------------------------------------------------------
 ;; Public Functions
 ;;-----------------------------------------------------------------------------
 
-;; Upload a new e-book
-(define-public (upload-ebook (title (string-ascii 64)))
+;; Upload a new e-book with metadata
+(define-public (upload-ebook 
+    (title (string-ascii 64)) 
+    (file-size uint) 
+    (summary (string-ascii 256)))
     (let
-        ((new-id (+ (var-get total-ebooks) u1))) ;; Generate new e-book ID
+        ((new-id (+ (var-get total-ebooks) u1))) ;; Generate a new unique e-book ID
+        
+        ;; Validate input
+        (asserts! (and (> (len title) u0) (< (len title) MAX-TITLE-LENGTH)) ERR-TITLE)
+        (asserts! (and (> file-size u0) (< file-size MAX-FILE-SIZE)) ERR-SIZE)
+        (asserts! (and (> (len summary) u0) (< (len summary) MAX-SUMMARY-LENGTH)) ERR-TITLE)
 
-        ;; Validate that the title is not empty
-        (asserts! (> (len title) u0) ERR-TITLE)
-
-        ;; Save e-book metadata into the map
+        ;; Store the e-book data
         (map-insert ebooks
             { ebook-id: new-id }
-            { title: title, author: tx-sender }
+            {
+                title: title,
+                author: tx-sender,
+                file-size: file-size,
+                upload-time: block-height,
+                summary: summary
+            }
         )
 
-        ;; Update the total e-books count
-        (var-set total-ebooks new-id)
+        ;; Assign the uploader access rights to the e-book
+        (map-insert access-rights
+            { ebook-id: new-id, user: tx-sender }
+            { can-access: true }
+        )
 
-        ;; Return the new e-book ID as confirmation
+        ;; Increment the total e-books count
+        (var-set total-ebooks new-id)
         (ok new-id)
     )
 )
 
-;; Retrieve metadata for a specific e-book by its ID
-(define-public (get-ebook (ebook-id uint))
-    ;; Check if the e-book exists and return its metadata or an error
-    (match (map-get? ebooks { ebook-id: ebook-id })
-        book (ok book)                      ;; If found, return the metadata
-        ERR-NOT-FOUND                      ;; Otherwise, return an error
+;; Transfer e-book ownership to a new author
+(define-public (transfer-ownership (ebook-id uint) (new-author principal))
+    (let
+        ((book-data (unwrap! (map-get? ebooks { ebook-id: ebook-id }) ERR-NOT-FOUND)))
+        
+        ;; Validate ownership
+        (asserts! (ebook-exists? ebook-id) ERR-NOT-FOUND)
+        (asserts! (is-eq (get author book-data) tx-sender) ERR-AUTH)
+
+        ;; Update the author field
+        (map-set ebooks
+            { ebook-id: ebook-id }
+            (merge book-data { author: new-author })
+        )
+        (ok true)
     )
 )
